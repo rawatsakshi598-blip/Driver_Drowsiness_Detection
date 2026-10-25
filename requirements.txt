@@ -1,14 +1,20 @@
 # Driver Drowsiness Detection — runtime dependencies
 #
-# Pinned to versions known to work on Python 3.12/3.13 on Linux, macOS, Windows.
+# IMPORTANT — MediaPipe version constraint:
+# The geometric detector uses MediaPipe's FaceMesh / FaceLandmarker API.
+# mediapipe 0.10.x has the legacy `mp.solutions.face_mesh` API (bundled model).
+# mediapipe 1.x (if released in your env) drops `solutions` and uses the
+# Tasks API which downloads a separate .task model file at runtime.
+# Our code supports BOTH — but the legacy 0.10.14 is preferred (no download).
 opencv-python>=4.8,<5.1
-mediapipe>=0.10.14,<2.0
+mediapipe==0.10.14
 tensorflow-cpu>=2.15; platform_system != "Darwin" or platform_machine != "arm64"
 tensorflow>=2.15; platform_system == "Darwin" and platform_machine == "arm64"
 flask>=3.0
 flask-cors>=4.0
 pyyaml>=6.0
-numpy>=1.24,<2.3
+numpy>=1.24,<2.2
+protobuf>=4.25.3,<5
 scikit-learn>=1.3
 pygame>=2.5            # cross-platform audio playback (replaces playsound)
 pytest>=8.0

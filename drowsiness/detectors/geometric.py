@@ -98,17 +98,116 @@ class GeometricDetector(Detector):
         # the EAR/MAR math).
         import mediapipe as mp  # noqa: WPS433
         self._mp = mp
-        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=False,  # 468 landmarks is enough; refine adds 478.
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-            static_image_mode=False,  # video mode = tracking on.
-        )
+        # API selector: 'legacy' (mediapipe 0.10.x, has mp.solutions.face_mesh)
+        # or 'tasks' (mediapipe 1.x, uses mp.tasks.python.vision.FaceLandmarker).
+        self._api: str = ""
+        # Underlying handle — FaceMesh (legacy) or FaceLandmarker (tasks).
+        self._face_mesh = None
+        self._init_face_mesh()
         # EMA-smoothed signals (one value per stream, updated each frame).
         self._ear_ema: float | None = None
         self._mar_ema: float | None = None
-        log.debug("GeometricDetector initialised")
+        log.debug("GeometricDetector initialised (api=%s)", self._api)
+
+    # ------------------------------------------------------------------ #
+    # MediaPipe API detection / initialisation
+    # ------------------------------------------------------------------ #
+    def _init_face_mesh(self) -> None:
+        """Detect which MediaPipe API is available and initialise the
+        appropriate FaceLandmarker / FaceMesh instance.
+
+        MediaPipe shipped two APIs over time:
+
+        1. Legacy API (mediapipe 0.10.x):
+              mp.solutions.face_mesh.FaceMesh(...)
+              results.multi_face_landmarks -> list of NormalizedLandmarkList
+        2. Tasks API (mediapipe 1.x):
+              mp.tasks.python.vision.FaceLandmarker
+              requires a downloaded .task model file
+
+        We try the legacy API first (it's bundled with the wheel), and
+        fall back to the Tasks API only if the legacy one is missing.
+        """
+        mp = self._mp
+        # ---- Try legacy API ----
+        legacy_face_mesh_cls = None
+        try:
+            if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+                legacy_face_mesh_cls = mp.solutions.face_mesh.FaceMesh
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("Legacy mp.solutions.face_mesh unavailable: %s", exc)
+
+        if legacy_face_mesh_cls is not None:
+            self._face_mesh = legacy_face_mesh_cls(
+                max_num_faces=1,
+                refine_landmarks=False,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+                static_image_mode=False,
+            )
+            self._api = "legacy"
+            return
+
+        # ---- Try Tasks API ----
+        try:
+            from mediapipe.tasks.python import vision  # noqa: WPS433
+            from mediapipe.tasks import python as mp_python  # noqa: WPS433
+            self._tasks_vision = vision
+            self._mp_python = mp_python
+            # Need to download the FaceLandmarker .task model.
+            model_path = self._ensure_face_landmarker_model()
+            base_options = mp_python.BaseOptions(model_asset_path=str(model_path))
+            options = vision.FaceLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.VIDEO,
+                num_faces=1,
+                min_face_detection_confidence=0.5,
+                min_face_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+            self._face_mesh = vision.FaceLandmarker.create_from_options(options)
+            self._api = "tasks"
+            self._tasks_frame_index = 0  # monotonic counter for timestamps
+            return
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not initialise MediaPipe FaceLandmarker with either "
+                f"the legacy 'mp.solutions.face_mesh' API or the new "
+                f"'mp.tasks.python.vision.FaceLandmarker' API.\n\n"
+                f"Detected mediapipe version: "
+                f"{getattr(mp, '__version__', 'unknown')}\n\n"
+                f"Original error: {exc}\n\n"
+                f"FIX: install the legacy mediapipe version that bundles "
+                f"the FaceMesh solution:\n\n"
+                f"    pip install --force-reinstall --no-deps "
+                f"mediapipe==0.10.14 'numpy<2.2' 'protobuf<5'\n\n"
+                f"Then re-run pytest."
+            ) from exc
+
+    @staticmethod
+    def _ensure_face_landmarker_model() -> "Path":
+        """Download the FaceLandmarker .task model if not already cached.
+
+        Only needed when using the Tasks API (mediapipe 1.x). The legacy
+        API (mediapipe 0.10.x) bundles the model in the wheel.
+        """
+        from pathlib import Path
+        import urllib.request
+        cache_dir = Path.home() / ".cache" / "drowsiness"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        model_path = cache_dir / "face_landmarker.task"
+        if model_path.exists() and model_path.stat().st_size > 1_000_000:
+            return model_path
+        url = ("https://storage.googleapis.com/mediapipe-models/"
+               "face_landmarker/face_landmarker/float16/1/"
+               "face_landmarker.task")
+        log.info("Downloading MediaPipe FaceLandmarker model from %s", url)
+        urllib.request.urlretrieve(url, model_path)
+        if not model_path.exists() or model_path.stat().st_size < 1_000_000:
+            raise RuntimeError(
+                f"Failed to download FaceLandmarker model to {model_path}"
+            )
+        return model_path
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -119,14 +218,34 @@ class GeometricDetector(Detector):
         t0 = time.perf_counter()
         rgb = self._bgr_to_rgb(frame)
         h, w = frame.shape[:2]
-        results = self._face_mesh.process(rgb)
+        if self._api == "legacy":
+            results = self._face_mesh.process(rgb)
+            face_landmarks_list = (
+                results.multi_face_landmarks if results.multi_face_landmarks else []
+            )
+        else:  # tasks API
+            import mediapipe as mp
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            ts_ms = int(self._tasks_frame_index * 33)  # ~30ms per frame
+            self._tasks_frame_index += 1
+            results = self._face_mesh.detect_for_video(mp_image, ts_ms)
+            face_landmarks_list = results.face_landmarks
         det = Detection()
-        if not results.multi_face_landmarks:
+        if not face_landmarks_list:
             det.latency_ms = (time.perf_counter() - t0) * 1000.0
             return det
-        landmarks = results.multi_face_landmarks[0]
+        # Normalize the landmark access:
+        # - Legacy API: face_landmarks_list[0] is a NormalizedLandmarkList
+        #   with a .landmark attribute (a list of NormalizedLandmark).
+        # - Tasks API: face_landmarks_list[0] is directly a list of
+        #   NormalizedLandmark objects.
+        first_face = face_landmarks_list[0]
+        if self._api == "legacy":
+            lm_list = first_face.landmark
+        else:
+            lm_list = first_face  # already a list of NormalizedLandmark
         pts = np.array(
-            [(lm.x * w, lm.y * h, lm.z) for lm in landmarks.landmark],
+            [(lm.x * w, lm.y * h, lm.z) for lm in lm_list],
             dtype=np.float32,
         )
         # Compute face bounding box from the FaceMesh oval landmarks.
@@ -162,8 +281,13 @@ class GeometricDetector(Detector):
         return det
 
     def close(self) -> None:
+        # Both APIs expose .close() but the Tasks API also requires
+        # explicit release to free the underlying TFLite interpreter.
         if getattr(self, "_face_mesh", None) is not None:
-            self._face_mesh.close()
+            try:
+                self._face_mesh.close()
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("Error closing face_mesh: %s", exc)
             self._face_mesh = None
         log.debug("GeometricDetector closed")
 
