@@ -55,6 +55,12 @@ PAT token.
 
 ### 1.2 Install dependencies (Python 3.10–3.12 required)
 
+> **⚠️ CRITICAL — read this before installing**
+>
+> If you see the error `AttributeError: module 'mediapipe' has no attribute 'solutions'`
+> during the tests, it means pip installed an incompatible mediapipe version.
+> The fix is at the bottom of this section. **Skip to "FIX" below.**
+
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -62,6 +68,36 @@ python -m pip install -r requirements.txt
 
 > On Windows, replace `python` with `py` if `python` isn't on PATH.
 > On Arch, use `python` (Python 3.12 is the system default).
+
+### 1.2.1 ⚠️ FIX if you see "module 'mediapipe' has no attribute 'solutions'"
+
+This is the **most common** error. Run this single command in your
+activated virtualenv to install the exact known-working versions:
+
+```powershell
+# Windows PowerShell (in your venv):
+pip install --force-reinstall mediapipe==0.10.14 "numpy<2.2" "protobuf>=4.25.3,<5" "scipy==1.13.1"
+```
+
+```bash
+# Linux/macOS (in your venv):
+pip install --force-reinstall mediapipe==0.10.14 'numpy<2.2' 'protobuf>=4.25.3,<5' 'scipy==1.13.1'
+```
+
+Then verify:
+
+```bash
+python -c "import mediapipe as mp; print(mp.__version__, hasattr(mp, 'solutions'))"
+# Expected: 0.10.14 True
+```
+
+> **Why these exact versions?**
+> - `mediapipe==0.10.14` — last version with the legacy `mp.solutions.face_mesh` API bundled with the model.
+> - `numpy<2.2` — mediapipe 0.10.14 was built against numpy 1.x; numpy 2.2+ breaks the C ABI.
+> - `protobuf>=4.25.3,<5` — mediapipe 0.10.14 uses protobuf's old `label` API which was removed in protobuf 5+.
+> - `scipy==1.13.1` — last scipy version that works with numpy 1.26.x.
+
+If you see any other error, see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for the exact fix command.
 
 ### 1.3 Run the full test suite (this is the proof)
 
