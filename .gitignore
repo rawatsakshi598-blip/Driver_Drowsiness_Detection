@@ -1,0 +1,6 @@
+﻿venv/
+__pycache__/
+*.pyc
+debug_log*.txt
+debug_test.py
+.ipynb_checkpoints/
