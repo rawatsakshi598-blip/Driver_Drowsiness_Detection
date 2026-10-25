@@ -1,0 +1,73 @@
+# Driver Drowsiness Detection — production configuration
+# --------------------------------------------------------
+# Every threshold in the runtime lives here.  Edit this file to tune the
+# system for your driver, lighting, or camera — no code changes needed.
+
+eye:
+  # Eye Aspect Ratio below which an eye is "closed".
+  # 0.20 = canonical Soukupova & Cech value.
+  ear_threshold: 0.20
+  # Number of consecutive closed-eye frames before the eye-alarm fires.
+  # 20 frames @ 15 FPS ≈ 1.3 s — fast enough to catch microsleeps,
+  # slow enough to ignore single-frame blinks.
+  closed_frame_threshold: 20
+  # PERCLOS rolling window length (seconds).  NHTSA standard = 60 s.
+  perclos_window_seconds: 60.0
+  # PERCLOS fraction above which we raise a fatigue alarm.
+  # 0.15 = 15 % of the last 60 s the eyes were closed.
+  perclos_threshold: 0.15
+  # EMA smoothing factor for EAR (0 = no smoothing, 1 = frozen).
+  ear_smoothing_alpha: 0.3
+
+mouth:
+  # Mouth Aspect Ratio above which the mouth is "open" (yawn).
+  mar_threshold: 0.55
+  # Number of consecutive open-mouth frames before counting a yawn onset.
+  yawn_frame_threshold: 10
+  # Yawn rate (yawns/min) above which we raise a fatigue alarm.
+  yawn_rate_per_minute: 3
+  # Window length (seconds) over which yawn rate is computed.
+  yawn_window_seconds: 60.0
+  mar_smoothing_alpha: 0.3
+
+video:
+  # 0 = default webcam.  Path/URL strings also accepted.
+  source: 0
+  width: 640
+  height: 480
+  # Target FPS — the loop paces itself to this.  15 FPS keeps latency
+  # low on a Core i5-8265U without losing temporal information.
+  target_fps: 15
+  # OpenCV backend override (CAP_DSHOW on Windows, None = auto).
+  backend: null
+
+alarm:
+  sound_path: "data/alarm.mp3"
+  # Cooldown between alarm activations, in seconds.
+  cooldown_seconds: 4.0
+  # Set to false for headless / CI runs.
+  enabled: true
+
+cnn:
+  # Path to the legacy Keras model.  Empty string disables the verifier.
+  model_path: "drowiness_new7.h5"
+  input_size: 145
+  # Confidence threshold above which we trust the CNN verdict.
+  confidence_threshold: 0.7
+  # Run the CNN every Nth frame (it is the slowest component on CPU).
+  run_every_n_frames: 5
+  # Class ordering from the original notebook.
+  # Indices: 0=yawn, 1=no_yawn, 2=Closed, 3=Open
+  class_names: ["yawn", "no_yawn", "Closed", "Open"]
+
+server:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8000
+
+# Render the cv2 preview window.
+show_window: true
+# Verbose logging.
+debug: false
+# Auto-stop after N seconds (0 = run forever).  Used by E2E tests.
+run_for_seconds: 0.0

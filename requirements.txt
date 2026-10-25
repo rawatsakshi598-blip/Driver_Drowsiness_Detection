@@ -1,0 +1,16 @@
+# Driver Drowsiness Detection — runtime dependencies
+#
+# Pinned to versions known to work on Python 3.12/3.13 on Linux, macOS, Windows.
+opencv-python>=4.8,<5.1
+mediapipe>=0.10.14,<2.0
+tensorflow-cpu>=2.15; platform_system != "Darwin" or platform_machine != "arm64"
+tensorflow>=2.15; platform_system == "Darwin" and platform_machine == "arm64"
+flask>=3.0
+flask-cors>=4.0
+pyyaml>=6.0
+numpy>=1.24,<2.3
+scikit-learn>=1.3
+pygame>=2.5            # cross-platform audio playback (replaces playsound)
+pytest>=8.0
+pytest-timeout>=2.2
+requests>=2.31         # for curl-equivalent verification tests

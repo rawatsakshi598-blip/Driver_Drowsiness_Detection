@@ -1,6 +1,38 @@
-﻿venv/
+# Caching & artifacts
 __pycache__/
-*.pyc
-debug_log*.txt
-debug_test.py
-.ipynb_checkpoints/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test artifacts:
+# - tests/assets/test_*.mp4 ARE committed (deterministic, small, required by tests)
+# - tests/assets/face/*.jpg ARE committed (required by tests)
+# Don't commit local throwaway test outputs:
+test_output/
+tmp/
+
+# Generated models (don't commit; retrain via training/train_colab.py)
+models/
+*.tflite
+*.savedmodel
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config overrides (don't commit personal tuning)
+config.local.yaml

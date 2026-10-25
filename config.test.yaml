@@ -1,0 +1,41 @@
+eye:
+  ear_threshold: 0.27           # Match the sleepy test face's EAR
+  closed_frame_threshold: 5
+  perclos_window_seconds: 60.0
+  perclos_threshold: 0.15
+  ear_smoothing_alpha: 0.3
+
+mouth:
+  mar_threshold: 0.40
+  yawn_frame_threshold: 3
+  yawn_rate_per_minute: 1
+  yawn_window_seconds: 30.0
+  mar_smoothing_alpha: 0.3
+
+video:
+  source: 0
+  width: 640
+  height: 480
+  target_fps: 15
+  backend: null
+
+alarm:
+  sound_path: "data/alarm.mp3"
+  cooldown_seconds: 4.0
+  enabled: true
+
+cnn:
+  model_path: ""
+  input_size: 145
+  confidence_threshold: 0.7
+  run_every_n_frames: 5
+  class_names: ["yawn", "no_yawn", "Closed", "Open"]
+
+server:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8000
+
+show_window: false
+debug: true
+run_for_seconds: 0.0
