@@ -69,11 +69,62 @@ class MouthConfig:
     # Number of consecutive frames a yawn must persist before we treat it
     # as a real yawn (filters out talking, sneezing, brief mouth openings).
     yawn_frame_threshold: int = 10
+    # Seconds a single yawn may last before we flag a PROLONGED_YAWN alert.
+    # Long-held yawns are a strong microsleep precursor — they should not
+    # wait for the per-minute yawn rate to trip.
+    max_yawn_seconds: float = 4.0
     # Maximum yawns per minute above which a fatigue alarm is raised.
     yawn_rate_per_minute: int = 3
     # Window over which the yawn rate is computed.
     yawn_window_seconds: float = 60.0
     mar_smoothing_alpha: float = 0.3
+
+
+@dataclass(frozen=True)
+class LightingConfig:
+    """Ambient-lighting checks applied to every frame (face or no face)."""
+    # If False, no lighting alerts are raised.
+    enabled: bool = True
+    # Mean grayscale brightness below which the frame is "too dark".
+    # 0 = black, 255 = white; 60 is a practical floor for road lighting.
+    min_brightness: float = 60.0
+    # Mean grayscale brightness above which the frame is washed out /
+    # direct sunlight into the lens.
+    max_brightness: float = 240.0
+    # Consecutive out-of-range frames before the lighting alert fires
+    # (avoids strobing on a single flash).
+    consecutive_frames: int = 8
+
+
+@dataclass(frozen=True)
+class FocusConfig:
+    """Camera focus / sharpness check (variance of Laplacian)."""
+    # If False, no out-of-focus alerts are raised.
+    enabled: bool = True
+    # Variance of the Laplacian below which the frame is too blurry to
+    # trust eye/mouth geometry.  Tune for your camera: higher = stricter.
+    min_sharpness: float = 60.0
+    # Consecutive blurry frames before the OUT_OF_FOCUS alert fires.
+    consecutive_frames: int = 8
+
+
+@dataclass(frozen=True)
+class DistractionConfig:
+    """Driver-attention checks — face missing, or looking away."""
+    # If False, no distraction alerts are raised.
+    enabled: bool = True
+    # Seconds the face may stay undetected before a FACE_NOT_VISIBLE
+    # alert (severity: critical) fires.  At 15 FPS this is ~30 frames.
+    no_face_seconds: float = 2.0
+    # Head-yaw straightness (min/max of nose-to-cheek distances, 1.0 =
+    # facing the road).  Below this the driver is considered to be
+    # looking away from the road.
+    look_away_straightness: float = 0.55
+    # Consecutive look-away frames before LOOKING_AWAY fires.
+    look_away_frames: int = 10
+    # If True, FACE_NOT_VISIBLE and PROLONGED_YAWN also sound the alarm.
+    # Low light / blur / look-away always stay visual + log only.
+    alarm_with_sound: bool = True
 
 
 @dataclass(frozen=True)
@@ -133,6 +184,9 @@ class ServerConfig:
 class Config:
     eye: EyeConfig = field(default_factory=EyeConfig)
     mouth: MouthConfig = field(default_factory=MouthConfig)
+    lighting: LightingConfig = field(default_factory=LightingConfig)
+    focus: FocusConfig = field(default_factory=FocusConfig)
+    distraction: DistractionConfig = field(default_factory=DistractionConfig)
     video: VideoConfig = field(default_factory=VideoConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
     cnn: CNNConfig = field(default_factory=CNNConfig)
@@ -166,6 +220,9 @@ class Config:
         sub_keys = {
             "eye": EyeConfig,
             "mouth": MouthConfig,
+            "lighting": LightingConfig,
+            "focus": FocusConfig,
+            "distraction": DistractionConfig,
             "video": VideoConfig,
             "alarm": AlarmConfig,
             "cnn": CNNConfig,

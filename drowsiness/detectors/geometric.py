@@ -215,9 +215,17 @@ class GeometricDetector(Detector):
     def detect(self, frame: np.ndarray) -> Detection:
         """Run FaceMesh on ``frame`` (BGR uint8 HxWx3) and return a Detection."""
         import time
+        import cv2
         t0 = time.perf_counter()
         rgb = self._bgr_to_rgb(frame)
         h, w = frame.shape[:2]
+        det = Detection()
+        # ---- Frame-level environment metrics (face or no face) ----
+        # Brightness + sharpness drive the lighting / focus alerts, so
+        # they must be computed even when FaceMesh finds nothing.
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        det.mean_brightness = float(gray.mean())
+        det.sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         if self._api == "legacy":
             results = self._face_mesh.process(rgb)
             face_landmarks_list = (
@@ -230,7 +238,6 @@ class GeometricDetector(Detector):
             self._tasks_frame_index += 1
             results = self._face_mesh.detect_for_video(mp_image, ts_ms)
             face_landmarks_list = results.face_landmarks
-        det = Detection()
         if not face_landmarks_list:
             det.latency_ms = (time.perf_counter() - t0) * 1000.0
             return det
@@ -257,6 +264,17 @@ class GeometricDetector(Detector):
         fl = FaceLandmarks(points=pts, bbox=bbox)
         det.face_found = True
         det.face_bbox = bbox
+
+        # ---- Head yaw straightness ----
+        # Nose tip vs. the two tragion landmarks (234 = one side,
+        # 454 = other).  Facing forward => distances are ~equal
+        # (straightness ~1.0); a turned head shrinks one side.
+        # Direction-agnostic: uses min/max instead of a signed ratio.
+        nose_2d = pts[1, :2]
+        d_234 = float(np.linalg.norm(pts[234, :2] - nose_2d))
+        d_454 = float(np.linalg.norm(pts[454, :2] - nose_2d))
+        longer, shorter = max(d_234, d_454), min(d_234, d_454)
+        det.face_straightness = (shorter / longer) if longer > 1e-6 else 1.0
 
         # ---- EAR ----
         left_ear = eye_aspect_ratio(fl.eye_landmarks(FaceMeshIndices.LEFT_EYE))

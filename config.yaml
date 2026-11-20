@@ -29,6 +29,45 @@ mouth:
   # Window length (seconds) over which yawn rate is computed.
   yawn_window_seconds: 60.0
   mar_smoothing_alpha: 0.3
+  # A single yawn held longer than this raises a PROLONGED_YAWN alert
+  # immediately (does not wait for the per-minute rate).  ~4 s is a
+  # strong microsleep precursor.
+  max_yawn_seconds: 4.0
+
+lighting:
+  # Check ambient lighting on EVERY frame (works with or without a face).
+  enabled: true
+  # Mean grayscale brightness below which the frame is "too dark".
+  min_brightness: 60.0
+  # Mean grayscale brightness above which the frame is overexposed.
+  max_brightness: 240.0
+  # Consecutive out-of-range frames before LOW_LIGHT / BRIGHT_LIGHT fires.
+  consecutive_frames: 8
+
+focus:
+  # Camera focus check via variance of the Laplacian (blur detection).
+  enabled: true
+  # Sharpness below which the frame is too blurry to trust detection.
+  min_sharpness: 60.0
+  # Consecutive blurry frames before OUT_OF_FOCUS fires.
+  consecutive_frames: 8
+
+distraction:
+  # Driver-attention checks.
+  enabled: true
+  # Seconds the face may stay undetected before the CRITICAL
+  # FACE_NOT_VISIBLE alert fires (also sounds the alarm if
+  # alarm_with_sound is true).
+  no_face_seconds: 2.0
+  # Head-yaw straightness in (0,1] — min/max nose-to-cheek distance.
+  # Facing the road ~= 1.0; below this the driver is looking away.
+  look_away_straightness: 0.55
+  # Consecutive looking-away frames before LOOKING_AWAY fires.
+  look_away_frames: 10
+  # Sound the alarm for FACE_NOT_VISIBLE and PROLONGED_YAWN.
+  # (LOW_LIGHT / BRIGHT_LIGHT / OUT_OF_FOCUS / LOOKING_AWAY are always
+  # visual + log + status only.)
+  alarm_with_sound: true
 
 video:
   # 0 = default webcam.  Path/URL strings also accepted.

@@ -93,6 +93,19 @@ Every tunable parameter lives in [`config.yaml`](./config.yaml):
 | `mouth`    | `mar_threshold`           | 0.55    | MAR above this → mouth open (yawn)       |
 | `mouth`    | `yawn_frame_threshold`    | 10      | Consecutive open-mouth frames → yawn     |
 | `mouth`    | `yawn_rate_per_minute`    | 3       | Yawns/min above this → yawn alarm         |
+| `mouth`    | `max_yawn_seconds`        | 4.0     | Single yawn held longer → PROLONGED_YAWN |
+| `lighting` | `enabled`                 | `true`  | Check ambient lighting on every frame      |
+| `lighting` | `min_brightness`          | 60.0    | Below this mean gray value → too dark     |
+| `lighting` | `max_brightness`          | 240.0   | Above this → overexposed                  |
+| `lighting` | `consecutive_frames`      | 8       | Frames before LOW_LIGHT / BRIGHT_LIGHT    |
+| `focus`    | `enabled`                 | `true`  | Blur check (variance of Laplacian)        |
+| `focus`    | `min_sharpness`           | 60.0    | Below this → too blurry to trust          |
+| `focus`    | `consecutive_frames`      | 8       | Frames before OUT_OF_FOCUS fires          |
+| `distraction` | `enabled`              | `true`  | Driver-attention checks                    |
+| `distraction` | `no_face_seconds`      | 2.0     | Face unseen this long → FACE_NOT_VISIBLE  |
+| `distraction` | `look_away_straightness` | 0.55 | Head-yaw straightness below → looking away |
+| `distraction` | `look_away_frames`     | 10      | Frames before LOOKING_AWAY fires          |
+| `distraction` | `alarm_with_sound`     | `true`  | Sound alarm for critical alerts           |
 | `video`    | `target_fps`              | 15      | Loop pacing (15 FPS on i5-8265U)         |
 | `alarm`    | `cooldown_seconds`        | 4.0     | Cooldown between alarm triggers           |
 | `cnn`      | `model_path`              | `drowiness_new7.h5` | Legacy Keras verifier (optional) |
@@ -109,7 +122,8 @@ full verification script.
 | Endpoint                | Method | Description                                  |
 |-------------------------|--------|----------------------------------------------|
 | `/health`               | GET    | Liveness probe (`{"status":"ok"}`)          |
-| `/status`               | GET    | Live detection state (FPS, EAR, MAR, alarms) |
+| `/status`               | GET    | Live detection state (FPS, EAR, MAR, alarms, alerts) |
+| `/alerts`               | GET    | Only the currently-active real-time alerts   |
 | `/config`               | GET    | Dump the current configuration as JSON       |
 | `/start`                | POST   | Start the monitor                            |
 | `/stop`                 | POST   | Stop the monitor                            |
@@ -121,8 +135,44 @@ Example:
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/status | jq
+curl http://127.0.0.1:8000/alerts | jq
 curl -X POST http://127.0.0.1:8000/alarm/test
 ```
+
+---
+
+## Real-time alerts (new)
+
+Besides the three drowsiness alarms (`eye_closure`, `yawn_burst`,
+`perclos`), the pipeline now emits **edge-triggered alerts** the moment a
+problem appears — logged immediately to the console, drawn on the HUD,
+and exposed via `/status` and `/alerts`:
+
+| Code                | Severity   | Fires when                                         |
+|---------------------|------------|----------------------------------------------------|
+| `FACE_NOT_VISIBLE`  | `critical` | Face undetected for more than `distraction.no_face_seconds` |
+| `LOOKING_AWAY`      | `warning`  | Driver's head turned away from the road (low yaw straightness) |
+| `PROLONGED_YAWN`    | `warning`  | One yawn held longer than `mouth.max_yawn_seconds` |
+| `LOW_LIGHT`         | `warning`  | Mean frame brightness below `lighting.min_brightness` |
+| `BRIGHT_LIGHT`      | `warning`  | Mean frame brightness above `lighting.max_brightness` |
+| `OUT_OF_FOCUS`      | `warning`  | Frame blurrier than `focus.min_sharpness` (Laplacian variance) |
+
+Detection details:
+
+* **Lighting / sharpness** are computed from the raw grayscale frame on
+  *every* frame — they work even with no face visible.
+* **Head-yaw straightness** is `min/max` of the nose-tip → cheek-tragion
+  (landmarks 234/454) distances; `1.0` = facing the road, trending toward
+  `0` as the head turns.
+* **Edge-triggered logging**: each alert logs once when it appears
+  (`ALERT [CODE]: ...`) and once when it clears (`Alert cleared: ...`),
+  never per-frame spam.
+* `FACE_NOT_VISIBLE` and `PROLONGED_YAWN` also sound the alarm when
+  `distraction.alarm_with_sound` is `true`; the rest are visual + log +
+  status only.
+* Drowsiness semantics are unchanged: `any_alarm` still means
+  eye/yawn-rate/PERCLOS only; `any_alert` covers the new codes;
+  `any_issue` = either.
 
 ---
 

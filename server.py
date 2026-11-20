@@ -4,7 +4,8 @@ Endpoints
 ---------
 
 GET  /health           basic liveness probe
-GET  /status           live detection status (FPS, EAR, MAR, alarms, ...)
+GET  /status           live detection status (FPS, EAR, MAR, alarms, alerts, ...)
+GET  /alerts           only the currently-active real-time alerts
 GET  /config           dump the current configuration as JSON
 POST /alarm/test       force-trigger the alarm (returns the AlarmEvent)
 POST /alarm/reset      reset the alarm state
@@ -72,6 +73,30 @@ def create_app(config: Config,
         st["uptime_seconds"] = (time.time() - started) if started else 0
         return jsonify(st)
 
+    @app.get("/alerts")
+    def alerts():
+        mon = state["monitor"]
+        if mon is None:
+            return jsonify({
+                "running": False,
+                "any_alert": False,
+                "any_issue": False,
+                "alerts": [],
+                "message": "Monitor not started. POST /start to begin.",
+            })
+        st = mon.status()
+        return jsonify({
+            "running": True,
+            "any_alert": st["any_alert"],
+            "any_issue": st["any_issue"],
+            "alerts": st["alerts"],
+            "face_missing_alarm": st["face_missing_alarm"],
+            "looking_away_alarm": st["looking_away_alarm"],
+            "prolonged_yawn_alarm": st["prolonged_yawn_alarm"],
+            "lighting_alarm": st["lighting_alarm"],
+            "out_of_focus_alarm": st["out_of_focus_alarm"],
+        })
+
     @app.get("/config")
     def get_config():
         return jsonify(config.to_dict())
@@ -100,11 +125,13 @@ def create_app(config: Config,
     def start_monitor():
         if state["monitor"] is not None and state["monitor_thread"].is_alive():
             return jsonify({"error": "monitor already running"}), 409
-        mon = DrowsinessMonitor(config)
-        state["monitor"] = mon
-        state["started_at"] = time.time()
         # Open the source now so start() returns even if the camera is busy.
+        # Construction failures (missing deps, camera busy, ...) must also
+        # come back as JSON 500, not as an unhandled exception.
         try:
+            mon = DrowsinessMonitor(config)
+            state["monitor"] = mon
+            state["started_at"] = time.time()
             mon._source.open()
         except Exception as exc:
             state["monitor"] = None

@@ -57,6 +57,14 @@ class Detection:
     face_bbox: Optional[Tuple[int, int, int, int]] = None
     # Processing latency of this frame, in milliseconds.
     latency_ms: Optional[float] = None
+    # Mean grayscale brightness of the frame (0–255).  Computed before
+    # face analysis so it is available even when no face is found.
+    mean_brightness: Optional[float] = None
+    # Sharpness of the frame (variance of Laplacian; higher = sharper).
+    sharpness: Optional[float] = None
+    # Head-yaw straightness in (0, 1]: min/max of nose-to-cheek distances.
+    # 1.0 = facing the camera/road; →0 means increasingly turned away.
+    face_straightness: Optional[float] = None
     # Frame index (monotonic counter maintained by the orchestrator).
     frame_index: int = 0
 
