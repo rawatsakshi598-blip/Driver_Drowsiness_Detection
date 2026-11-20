@@ -52,6 +52,9 @@ class FatigueState:
     yawn_alarm: bool = False
     # Whether the PERCLOS-alarm condition is currently firing.
     perclos_alarm: bool = False
+    # True ONLY on the frame a yawn becomes confirmed (rising-edge event
+    # used by the audio manager; cleared on every other frame).
+    yawn_just_confirmed: bool = False
     # Latest EAR/MAR values for monitoring.
     latest_ear: Optional[float] = None
     latest_mar: Optional[float] = None
@@ -133,10 +136,13 @@ class DrowsinessTracker:
         self._last_face_seen_at: Optional[float] = None
         # Wall-clock time the *current* yawn started (None = not yawning).
         self._yawn_started_at: Optional[float] = None
+        # True once the current yawn has been confirmed (counted once).
+        self._yawn_confirmed = False
+        # Wall-clock time the current look-away began (None = facing road).
+        self._look_away_since: Optional[float] = None
         self._dark_frames = 0
         self._bright_frames = 0
         self._blurry_frames = 0
-        self._look_away_frames = 0
         # Codes currently logged as active (for edge-triggered logging).
         self._active_alert_codes: set[str] = set()
 
@@ -153,6 +159,7 @@ class DrowsinessTracker:
         cfg = self._cfg
         st = self._state
         st.frames_processed += 1
+        st.yawn_just_confirmed = False
         st.latest_ear = detection.ear
         st.latest_mar = detection.mar
         st.latest_brightness = detection.mean_brightness
@@ -182,7 +189,8 @@ class DrowsinessTracker:
             )
             # Attention signals that require a face are cleared.
             st.looking_away_alarm = False
-            self._look_away_frames = 0
+            self._look_away_since = None
+            self._yawn_confirmed = False
             # Suppress the prolonged-yawn alarm while the face is gone,
             # but keep the yawn-streak bookkeeping paused rather than
             # reset — a transient one-frame detection glitch must not
@@ -210,18 +218,26 @@ class DrowsinessTracker:
         # ---------------- Yawn state ----------------
         if detection.yawning:
             st.consecutive_yawn_frames += 1
-            # Prolonged-yawn bookkeeping: track when this yawn began.
+            # Prolonged-yawn / confirm bookkeeping: track when this yawn began.
             if self._yawn_started_at is None:
                 self._yawn_started_at = now
+            yawn_duration = now - self._yawn_started_at
+            # Time-based confirm (fps-independent): yawn confirmed once the
+            # mouth has stayed open for yawn_confirm_seconds.  Fires within
+            # ~0.5 s of a real yawn and is immune to FPS drops.
+            if not self._yawn_confirmed and yawn_duration >= cfg.mouth.yawn_confirm_seconds:
+                self._yawn_confirmed = True
+                st.yawn_just_confirmed = True
             st.prolonged_yawn_alarm = (
-                (now - self._yawn_started_at) >= cfg.mouth.max_yawn_seconds
+                yawn_duration >= cfg.mouth.max_yawn_seconds
             )
         else:
-            # Detect yawn onset only (rising edge) so we count yawns, not frames.
-            if st.consecutive_yawn_frames >= cfg.mouth.yawn_frame_threshold:
+            # Count one yawn per confirmed event (rising-confirm edge).
+            if self._yawn_confirmed:
                 self._yawn_window.append(now)
             st.consecutive_yawn_frames = 0
             self._yawn_started_at = None
+            self._yawn_confirmed = False
             st.prolonged_yawn_alarm = False
         self._expire_yawn_window(now)
         st.yawn_count_window = len(self._yawn_window)
@@ -231,7 +247,7 @@ class DrowsinessTracker:
         )
 
         # ---------------- Look-away (head yaw) ----------------
-        self._update_look_away(st, detection)
+        self._update_look_away(st, detection, now)
 
         # ---------------- Alarms ----------------
         st.eye_alarm = st.consecutive_closed_frames >= cfg.eye.closed_frame_threshold
@@ -250,10 +266,11 @@ class DrowsinessTracker:
         self._yawn_window.clear()
         self._last_face_seen_at = None
         self._yawn_started_at = None
+        self._yawn_confirmed = False
+        self._look_away_since = None
         self._dark_frames = 0
         self._bright_frames = 0
         self._blurry_frames = 0
-        self._look_away_frames = 0
         self._active_alert_codes = set()
 
     # ------------------------------------------------------------------ #
@@ -269,9 +286,17 @@ class DrowsinessTracker:
             st.bright_light_alarm = False
             st.lighting_alarm = False
             return
-        self._dark_frames = (self._dark_frames + 1) if b < cfg.min_brightness else 0
+        # Hysteresis: once LOW_LIGHT latched, brightness must rise above
+        # recover_brightness (not back above min_brightness) to clear —
+        # otherwise a frame hovering at 60/61 flickers the alert.
+        if st.low_light_alarm:
+            if b >= cfg.recover_brightness:
+                self._dark_frames = 0
+                st.low_light_alarm = False
+        else:
+            self._dark_frames = (self._dark_frames + 1) if b < cfg.min_brightness else 0
+            st.low_light_alarm = self._dark_frames >= cfg.consecutive_frames
         self._bright_frames = (self._bright_frames + 1) if b > cfg.max_brightness else 0
-        st.low_light_alarm = self._dark_frames >= cfg.consecutive_frames
         st.bright_light_alarm = self._bright_frames >= cfg.consecutive_frames
         st.lighting_alarm = st.low_light_alarm or st.bright_light_alarm
 
@@ -285,18 +310,23 @@ class DrowsinessTracker:
         self._blurry_frames = (self._blurry_frames + 1) if s < cfg.min_sharpness else 0
         st.out_of_focus_alarm = self._blurry_frames >= cfg.consecutive_frames
 
-    def _update_look_away(self, st: FatigueState, detection: Detection) -> None:
+    def _update_look_away(self, st: FatigueState, detection: Detection,
+                          now: float) -> None:
         cfg = self._cfg.distraction
         s = detection.face_straightness
         if not cfg.enabled or s is None:
-            self._look_away_frames = 0
+            self._look_away_since = None
             st.looking_away_alarm = False
             return
-        self._look_away_frames = (
-            (self._look_away_frames + 1)
-            if s < cfg.look_away_straightness else 0
-        )
-        st.looking_away_alarm = self._look_away_frames >= cfg.look_away_frames
+        if s < cfg.look_away_straightness:
+            # Time-based (fps-independent): fires after look_away_seconds of
+            # sustained head-turn, not after N frames.
+            if self._look_away_since is None:
+                self._look_away_since = now
+            st.looking_away_alarm = (now - self._look_away_since) >= cfg.look_away_seconds
+        else:
+            self._look_away_since = None
+            st.looking_away_alarm = False
 
     # ------------------------------------------------------------------ #
     # Alert construction + edge-triggered logging
@@ -309,9 +339,8 @@ class DrowsinessTracker:
                 "code": "FACE_NOT_VISIBLE",
                 "severity": "critical",
                 "message": (
-                    f"Driver's face not visible for {st.consecutive_no_face_seconds:.1f}s "
-                    f"(limit {cfg.distraction.no_face_seconds:.1f}s) — "
-                    "possible distraction or the driver leaving the wheel"
+                    f"Face not visible for {st.consecutive_no_face_seconds:.1f}s "
+                    f"(limit {cfg.distraction.no_face_seconds:.1f}s)"
                 ),
                 "value": round(st.consecutive_no_face_seconds, 2),
             })
@@ -345,10 +374,7 @@ class DrowsinessTracker:
                     "code": "LOW_LIGHT",
                     "severity": "warning",
                     "message": (
-                        f"Insufficient lighting — brightness "
-                        f"{bri if bri is not None else 0.0:.0f}/255 "
-                        f"(min {cfg.lighting.min_brightness:.0f}). "
-                        "Detection may fail until lighting improves"
+                        f"Low light (brightness {bri if bri is not None else 0.0:.0f}/255, min {cfg.lighting.min_brightness:.0f})"
                     ),
                     "value": None if bri is None else round(bri, 1),
                 })
@@ -357,10 +383,7 @@ class DrowsinessTracker:
                     "code": "BRIGHT_LIGHT",
                     "severity": "warning",
                     "message": (
-                        f"Frame overexposed — brightness "
-                        f"{bri if bri is not None else 255.0:.0f}/255 "
-                        f"(max {cfg.lighting.max_brightness:.0f}). "
-                        "Reduce glare on the camera lens"
+                        f"Overexposed (brightness {bri if bri is not None else 255.0:.0f}/255, max {cfg.lighting.max_brightness:.0f})"
                     ),
                     "value": None if bri is None else round(bri, 1),
                 })
@@ -370,10 +393,7 @@ class DrowsinessTracker:
                 "code": "OUT_OF_FOCUS",
                 "severity": "warning",
                 "message": (
-                    f"Frame too blurry to trust detection — sharpness "
-                    f"{sharp if sharp is not None else 0.0:.1f} "
-                    f"(min {cfg.focus.min_sharpness:.1f}). "
-                    "Clean or refocus the camera"
+                    f"Blurry frame (sharpness {sharp if sharp is not None else 0.0:.1f}, min {cfg.focus.min_sharpness:.1f})"
                 ),
                 "value": None if sharp is None else round(sharp, 1),
             })

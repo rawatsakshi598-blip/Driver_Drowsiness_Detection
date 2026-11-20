@@ -91,7 +91,7 @@ def test_yawning_video_triggers_yawn_alarm():
     cfg = load_config(overrides={
         "show_window": False,
         "cnn": {"model_path": ""},
-        "mouth": {"yawn_frame_threshold": 3,
+        "mouth": {"yawn_confirm_seconds": 0.2,
                   "yawn_rate_per_minute": 3,
                   "yawn_window_seconds": 30.0},
     })
@@ -107,7 +107,7 @@ def test_mixed_video_fires_at_least_one_alarm():
         "show_window": False,
         "cnn": {"model_path": ""},
         "eye": {"closed_frame_threshold": 5},
-        "mouth": {"yawn_frame_threshold": 3,
+        "mouth": {"yawn_confirm_seconds": 0.2,
                   "yawn_rate_per_minute": 1,
                   "yawn_window_seconds": 30.0},
     })

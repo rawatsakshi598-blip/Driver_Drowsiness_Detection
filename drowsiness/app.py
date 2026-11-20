@@ -17,7 +17,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .alarms.sound_alarm import SoundAlarm
+from .alarms.audio_manager import AudioManager
 from .config import Config, load_config
 from .detectors.base import Detection
 from .detectors.cnn import CNNVerifier
@@ -36,7 +36,11 @@ class DrowsinessMonitor:
         self._source = VideoSource(config.video)
         self._detector = GeometricDetector(config)
         self._tracker = DrowsinessTracker(config)
-        self._alarm = SoundAlarm(config.alarm)
+        # One shared, non-blocking audio pipeline for ALL alert types.
+        # NOTE: legacy name kept (``mon._alarm``) so server.py and other
+        # call sites keep working unchanged.
+        self._audio = AudioManager(config.audio, config.alarm)
+        self._alarm = self._audio
         self._cnn: Optional[CNNVerifier] = None
         self._stop = False
         self._last_cnn_frame = -1
@@ -57,6 +61,7 @@ class DrowsinessMonitor:
         self._detector.close()
         if self._cnn is not None:
             self._cnn.close()
+        self._audio.shutdown()  # stop worker, drain, release the mixer
 
     def stop(self) -> None:
         self._stop = True
@@ -85,10 +90,10 @@ class DrowsinessMonitor:
 
         log.info(
             "Alerts enabled: lighting=%s focus=%s distraction=%s "
-            "prolonged_yawn(>%.1fs) look_away(<%.2f for %d frames)",
+            "prolonged_yawn(>%.1fs) look_away(<%.2f for %.1fs)",
             cfg.lighting.enabled, cfg.focus.enabled, cfg.distraction.enabled,
             cfg.mouth.max_yawn_seconds,
-            cfg.distraction.look_away_straightness, cfg.distraction.look_away_frames,
+            cfg.distraction.look_away_straightness, cfg.distraction.look_away_seconds,
         )
         deadline = (cfg.run_for_seconds or 0.0)
         start = time.perf_counter()
@@ -127,10 +132,10 @@ class DrowsinessMonitor:
                         detection.cnn_class = cnn_det.cnn_class
                         detection.cnn_confidence = cnn_det.cnn_confidence
 
-                # Update tracker + alarms.
+                # Update tracker + route alert audio (non-blocking).
                 state = self._tracker.update(detection)
                 self._latest_state = state
-                self._maybe_trigger_alarm(state)
+                self._update_audio(state, detection.timestamp)
 
                 # Render overlay (optional).
                 if cfg.show_window:
@@ -197,38 +202,53 @@ class DrowsinessMonitor:
             "any_issue": st.any_issue,
             "alerts": st.alerts,
             "alarm_active": self._alarm.is_active(),
+            "audio_enabled": self._cfg.audio.enabled,
+            "audio_beeps_emitted": self._audio.beeps_emitted,
+            "audio_debug": self._cfg.audio.debug,
             "cnn_enabled": self.is_cnn_enabled,
         }
 
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
-    def _maybe_trigger_alarm(self, state) -> None:
-        sound_worthy_alert = (
+    def _update_audio(self, state, now: float) -> None:
+        """Route this frame's alert conditions into the shared AudioManager.
+
+        Cheap, non-blocking — just enqueues decisions.  Gating is done by
+        the tracker (time-based) and by AudioManager's state machine.
+        Priority: drowsy > look_away > yawn > low_light.
+        """
+        audio = self._audio
+        cfg = self._cfg
+        # Drowsiness bucket (unchanged behaviour, routed via AudioManager).
+        # FACE_NOT_VISIBLE / PROLONGED_YAWN critical alerts ride along when
+        # distraction.alarm_with_sound is enabled — same mp3 as before.
+        drowsy_condition = state.any_alarm
+        if cfg.distraction.alarm_with_sound and (
             state.face_missing_alarm or state.prolonged_yawn_alarm
+        ):
+            drowsy_condition = True
+        drowsy_value = (
+            float(state.consecutive_closed_frames) if state.eye_alarm else
+            state.yawn_rate_per_min if state.yawn_alarm else
+            state.perclos if state.perclos_alarm else
+            state.consecutive_no_face_seconds
         )
-        want_sound = state.any_alarm or (
-            sound_worthy_alert and self._cfg.distraction.alarm_with_sound
-        )
-        if not want_sound:
-            self._alarm.reset()
-            return
-        # Pick a reason + numeric metric for the alarm log.
-        if state.eye_alarm:
-            reason, metric = "eye_closure", state.consecutive_closed_frames
-        elif state.yawn_alarm:
-            reason, metric = "yawn_burst", state.yawn_rate_per_min
-        elif state.perclos_alarm:
-            reason, metric = "perclos", state.perclos
-        elif state.face_missing_alarm:
-            reason, metric = "face_not_visible", state.consecutive_no_face_seconds
-        else:  # prolonged yawn
-            value = next(
-                (a.get("value") for a in state.alerts if a["code"] == "PROLONGED_YAWN"),
-                0.0,
-            ) or 0.0
-            reason, metric = "prolonged_yawn", float(value)
-        self._alarm.trigger(str(reason), float(metric))
+        audio.update("drowsy", drowsy_condition, value=drowsy_value,
+                     threshold=cfg.eye.closed_frame_threshold, now=now)
+        # Looking away — sustained >= distraction.look_away_seconds (tracker).
+        audio.update("look_away", state.looking_away_alarm,
+                     value=state.latest_face_straightness,
+                     threshold=cfg.distraction.look_away_straightness, now=now)
+        # Yawn — rising edge the moment a yawn is CONFIRMED (~0.5 s), not
+        # after yawn rate/min aggregates.
+        audio.update("yawn", state.yawn_just_confirmed,
+                     value=state.latest_mar,
+                     threshold=cfg.mouth.mar_threshold, now=now)
+        # Low light — hysteresis handled by the tracker (enter <60 / exit >65).
+        audio.update("low_light", state.low_light_alarm,
+                     value=state.latest_brightness,
+                     threshold=cfg.lighting.min_brightness, now=now)
 
     def _render_overlay(self, image: np.ndarray, det: Detection, state) -> None:
         """Draw face bbox, EAR/MAR readout, live alerts, and alarm banners."""
@@ -285,7 +305,8 @@ class DrowsinessMonitor:
 
         # ---- Live alert banners, stacked from the bottom up ----
         # Critical drowsiness stays red/white; distraction-critical alerts
-        # also red/white; warnings are amber/black.
+        # also red/white; warnings are amber/black.  Text is scaled (or
+        # wrapped to two lines) to ALWAYS fit the frame width.
         banners = list(state.alerts)  # already built with code/severity/message
         if state.any_alarm:
             banners.append({
@@ -293,21 +314,59 @@ class DrowsinessMonitor:
                 "severity": "critical",
                 "message": f"DROWSINESS ALERT: {(state.alarm_reason or 'fatigue').upper()}",
             })
-        banner_h = 46
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        max_w = image.shape[1] - 20  # 10 px margin each side
         y = h
-        for banner in banners[-3:]:  # at most 3 rows
+
+        def _fit(lines_of_text, base_scale, thickness):
+            """Return (scale, lines) scaled to fit max_w; wraps if needed."""
+            scale = base_scale
+            for _ in range(2):  # shrink, then wrap as last resort
+                fitted = []
+                overflow = False
+                for text in lines_of_text:
+                    (tw, _th), _ = cv2.getTextSize(text, font, scale, thickness)
+                    if tw > max_w:
+                        overflow = True
+                        break
+                    fitted.append(text)
+                if not overflow:
+                    return scale, fitted
+                scale = max(0.38, scale * (max_w / tw) * 0.98)
+            # Still too wide at the floor scale: split the longest line.
+            wrapped = []
+            for text in lines_of_text:
+                words = text.split()
+                mid, best = len(words) // 2, None
+                acc1, acc2 = [], list(words)
+                while acc2:
+                    acc1.append(acc2.pop(0))
+                    cand1, cand2 = " ".join(acc1), " ".join(acc2)
+                    score = abs(len(cand1) - len(cand2))
+                    if best is None or score < best[0]:
+                        best = (score, cand1, cand2)
+                if best and best[2]:
+                    wrapped.extend([best[1], best[2]])
+                else:
+                    wrapped.append(text)
+            return min(scale, 0.45), wrapped
+
+        for banner in banners[-3:]:  # at most 3 banners
             critical = banner["severity"] == "critical"
             bg = (0, 0, 255) if critical else (0, 165, 255)
             fg = (255, 255, 255) if critical else (0, 0, 0)
-            cv2.rectangle(image, (0, y - banner_h), (w, y), bg, -1)
-            text = f"*** {banner['code']}: {banner['message']}"
-            if len(text) > 72:
-                text = text[:72]
-            cv2.putText(
-                image, text, (10, y - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, fg, 2, cv2.LINE_AA,
-            )
-            y -= banner_h
+            thickness = 2
+            full = f"*** {banner['code']}: {banner['message']}"
+            scale, lines = _fit([full], 0.6, thickness)
+            line_h = max(22, int(34 * scale + 10))
+            pad = 10
+            bh = line_h * len(lines) + pad
+            cv2.rectangle(image, (0, y - bh), (w, y), bg, -1)
+            for i, line in enumerate(lines):
+                ty = y - pad // 2 - (len(lines) - 1 - i) * line_h - 6
+                cv2.putText(image, line, (10, ty), font, scale, fg,
+                            thickness, cv2.LINE_AA)
+            y -= bh
 
 
 def main(argv: Optional[list[str]] = None) -> int:

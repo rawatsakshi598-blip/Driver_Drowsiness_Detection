@@ -154,6 +154,7 @@ def create_app(config: Config,
         try:
             mon._source.close()
             mon._detector.close()
+            mon._audio.shutdown()
         except Exception:
             pass
         state["monitor"] = None

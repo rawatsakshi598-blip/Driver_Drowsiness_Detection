@@ -238,3 +238,44 @@ These are committed to the repo. Don't delete them.
 2. Open a GitHub issue at:
    https://github.com/rawatsakshi598-blip/Driver_Drowsiness_Detection/issues
 3. Paste the full `test_output.log` content.
+
+---
+
+## 15. No sound / beeps from alerts (look-away, yawn, low-light, drowsy)
+
+**Symptom**: The HUD banner appears (e.g. LOW_LIGHT) but you hear nothing.
+
+**How the audio works**: all alerts go through one non-blocking
+`AudioManager` (`drowsiness/alarms/audio_manager.py`). Priority:
+`drowsy > look_away > yawn > low_light`. It must initialise ONCE at
+startup — look for this line in the log:
+
+```
+AudioManager: pygame mixer initialised (4 alert channels)
+```
+
+**Fixes**:
+
+1. If you see `AudioManager: no audio backend available — beeps will be logged only`,
+   the mixer could not init. Install pygame (`pip install pygame`) and make
+   sure your audio device is not held by another app. On headless Linux set
+   `SDL_AUDIODRIVER=pulse` or run with a real audio sink.
+2. `alarm.enabled` / `audio.enabled=false` in config.yaml silences audio
+   without touching detection. Set `audio.enabled: true`.
+3. On some headless/dummy SDL setups, `data/alarm.mp3` can't be played.
+   The manager now **automatically falls back to a synthesised tone** for
+   the drowsy alert — you'll see `DROWSY mp3 failed to play — falling back
+   to synthesised tone` in the log. Run `scripts/verify_with_curl.sh` or
+   `POST /alarm/test` to verify audio end-to-end.
+4. Too many overlapping beeps? Tune per-type `repeat_seconds` /
+   `priority` in the `audio:` section of config.yaml — no code changes.
+5. Nothing in the logs at all? Set `audio.debug: true` to get one
+   `ALERT_TRANSITION type=... -> ...` line per state change.
+
+---
+
+## 16. Alert beeps but banner text is cut off on the right edge
+
+**Fix**: upgraded overlay scales/wraps banner text with
+`cv2.getTextSize` (or wraps to two lines) — every alert message now
+always fits the frame width. Pull the latest `main`.

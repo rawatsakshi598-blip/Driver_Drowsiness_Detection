@@ -68,7 +68,12 @@ class MouthConfig:
     mar_threshold: float = 0.55
     # Number of consecutive frames a yawn must persist before we treat it
     # as a real yawn (filters out talking, sneezing, brief mouth openings).
+    # DEPRECATED: kept so old config.yaml files still parse; the confirm
+    # path is now time-based via ``yawn_confirm_seconds``.
     yawn_frame_threshold: int = 10
+    # Seconds MAR must stay above mar_threshold to confirm a yawn.
+    # ~0.45 s ≈ fires within ~0.5 s of the yawn opening, at any FPS.
+    yawn_confirm_seconds: float = 0.45
     # Seconds a single yawn may last before we flag a PROLONGED_YAWN alert.
     # Long-held yawns are a strong microsleep precursor — they should not
     # wait for the per-minute yawn rate to trip.
@@ -94,6 +99,9 @@ class LightingConfig:
     # Consecutive out-of-range frames before the lighting alert fires
     # (avoids strobing on a single flash).
     consecutive_frames: int = 8
+    # Hysteresis: once LOW_LIGHT has fired, brightness must climb above
+    # THIS value before it clears (enter < min_brightness, exit > recover).
+    recover_brightness: float = 65.0
 
 
 @dataclass(frozen=True)
@@ -118,13 +126,76 @@ class DistractionConfig:
     no_face_seconds: float = 2.0
     # Head-yaw straightness (min/max of nose-to-cheek distances, 1.0 =
     # facing the road).  Below this the driver is considered to be
-    # looking away from the road.
-    look_away_straightness: float = 0.55
-    # Consecutive look-away frames before LOOKING_AWAY fires.
+    # looking away from the road.  Calibration (nose→tragion geometry):
+    # ~0.58 ≈ 25–30° head turn; natural small movements stay above 0.7.
+    look_away_straightness: float = 0.58
+    # Seconds the head must stay turned away before LOOKING_AWAY fires.
+    # Time-based (robust at low FPS); ~1.0 s per discussion.
+    look_away_seconds: float = 1.0
+    # DEPRECATED: frame-count variant kept for old config files; ignored
+    # when ``look_away_seconds`` is set.
     look_away_frames: int = 10
     # If True, FACE_NOT_VISIBLE and PROLONGED_YAWN also sound the alarm.
     # Low light / blur / look-away always stay visual + log only.
     alarm_with_sound: bool = True
+
+
+@dataclass(frozen=True)
+class AudioAlertConfig:
+    """Per-alert-type audio settings (one entry per alert type)."""
+    # Enabled for this alert type (primary on/off switch).
+    enabled: bool = True
+    # Higher priority wins: a higher-priority alert may pre-empt a
+    # lower-priority one; a lower one never blocks a higher one.
+    priority: int = 0
+    # Minimum seconds between repeat beeps while the alert stays ACTIVE.
+    repeat_seconds: float = 4.0
+    # PENDING -> ACTIVE delay inside the audio state machine.  Usually
+    # 0.0 because the tracker already gates the condition in time (e.g.
+    # distraction.look_away_seconds); raise it to add an extra hold-off.
+    min_seconds: float = 0.0
+    # Playback volume 0.0–1.0.
+    volume: float = 0.6
+    # Tone frequency for synthesised beeps (ignored for DROWSY, which
+    # plays alarm.sound_path when the file exists).
+    frequency_hz: float = 440.0
+
+
+@dataclass(frozen=True)
+class AudioConfig:
+    """Audio manager configuration — single CONFIG block for ALL alerts.
+
+    DROWSY > LOOK_AWAY > YAWN > LOW_LIGHT priority order by default.
+    """
+    # Master switch for all alert audio (detection continues regardless).
+    enabled: bool = True
+    # DEBUG: one line per alert transition (type, state, value, threshold,
+    # timestamp).  Off by default to avoid log noise.
+    debug: bool = False
+    drowsy: AudioAlertConfig = field(
+        default_factory=lambda: AudioAlertConfig(
+            priority=100, repeat_seconds=4.0, min_seconds=0.0,
+            volume=1.0, frequency_hz=880.0,
+        )
+    )
+    look_away: AudioAlertConfig = field(
+        default_factory=lambda: AudioAlertConfig(
+            priority=60, repeat_seconds=2.0, min_seconds=0.0,
+            volume=0.8, frequency_hz=660.0,
+        )
+    )
+    yawn: AudioAlertConfig = field(
+        default_factory=lambda: AudioAlertConfig(
+            priority=40, repeat_seconds=2.0, min_seconds=0.0,
+            volume=0.7, frequency_hz=520.0,
+        )
+    )
+    low_light: AudioAlertConfig = field(
+        default_factory=lambda: AudioAlertConfig(
+            priority=20, repeat_seconds=4.0, min_seconds=0.0,
+            volume=0.35, frequency_hz=330.0,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -187,6 +258,7 @@ class Config:
     lighting: LightingConfig = field(default_factory=LightingConfig)
     focus: FocusConfig = field(default_factory=FocusConfig)
     distraction: DistractionConfig = field(default_factory=DistractionConfig)
+    audio: AudioConfig = field(default_factory=AudioConfig)
     video: VideoConfig = field(default_factory=VideoConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
     cnn: CNNConfig = field(default_factory=CNNConfig)
@@ -230,6 +302,9 @@ class Config:
         }
         kwargs = {}
         for key, value in data.items():
+            if key == "audio":
+                kwargs["audio"] = _build_audio_config(value)
+                continue
             if key in sub_keys:
                 if value is None:
                     continue
@@ -254,6 +329,40 @@ class Config:
     def to_dict(self) -> dict:
         """Recursively convert to a plain dict (handy for the status endpoint)."""
         return asdict(self)
+
+
+def _build_audio_config(value) -> AudioConfig:
+    """Build the nested ``audio:`` section with strict validation."""
+    if value is None:
+        return AudioConfig()
+    if not isinstance(value, dict):
+        raise ValueError("'audio' config must be a mapping")
+    alert_fields = ("drowsy", "look_away", "yawn", "low_light")
+    scalar = {"enabled", "debug"}
+    unknown = set(value) - set(alert_fields) - scalar
+    if unknown:
+        raise ValueError(f"Unknown keys in 'audio' config: {sorted(unknown)}")
+    kwargs = {}
+    for k in scalar:
+        if k in value:
+            kwargs[k] = bool(value[k])
+    defaults = AudioConfig()
+    allowed = set(AudioAlertConfig.__dataclass_fields__)
+    for name in alert_fields:
+        if name not in value or value[name] is None:
+            continue
+        sub = value[name]
+        if not isinstance(sub, dict):
+            raise ValueError(f"'audio.{name}' must be a mapping")
+        unknown_sub = set(sub) - allowed
+        if unknown_sub:
+            raise ValueError(
+                f"Unknown keys in 'audio.{name}' config: {sorted(unknown_sub)}"
+            )
+        base = asdict(getattr(defaults, name))
+        base.update(sub)
+        kwargs[name] = AudioAlertConfig(**base)
+    return AudioConfig(**kwargs)
 
 
 # Module-level default — instantiated lazily to keep import side-effects free.

@@ -23,12 +23,14 @@ mouth:
   # Mouth Aspect Ratio above which the mouth is "open" (yawn).
   mar_threshold: 0.55
   # Number of consecutive open-mouth frames before counting a yawn onset.
-  yawn_frame_threshold: 10
   # Yawn rate (yawns/min) above which we raise a fatigue alarm.
   yawn_rate_per_minute: 3
   # Window length (seconds) over which yawn rate is computed.
   yawn_window_seconds: 60.0
   mar_smoothing_alpha: 0.3
+  # Seconds MAR must stay above mar_threshold to confirm a yawn.
+  # ~0.45 s — beep fires within ~0.5 s, at any FPS.
+  yawn_confirm_seconds: 0.45
   # A single yawn held longer than this raises a PROLONGED_YAWN alert
   # immediately (does not wait for the per-minute rate).  ~4 s is a
   # strong microsleep precursor.
@@ -43,6 +45,9 @@ lighting:
   max_brightness: 240.0
   # Consecutive out-of-range frames before LOW_LIGHT / BRIGHT_LIGHT fires.
   consecutive_frames: 8
+  # Hysteresis: once LOW_LIGHT latched, brightness must climb above this
+  # value before it clears (enter < min_brightness, exit > recover).
+  recover_brightness: 65.0
 
 focus:
   # Camera focus check via variance of the Laplacian (blur detection).
@@ -59,11 +64,12 @@ distraction:
   # FACE_NOT_VISIBLE alert fires (also sounds the alarm if
   # alarm_with_sound is true).
   no_face_seconds: 2.0
+  # Seconds the head must stay turned before LOOKING_AWAY fires.
+  look_away_seconds: 1.0
   # Head-yaw straightness in (0,1] — min/max nose-to-cheek distance.
-  # Facing the road ~= 1.0; below this the driver is looking away.
-  look_away_straightness: 0.55
-  # Consecutive looking-away frames before LOOKING_AWAY fires.
-  look_away_frames: 10
+  # Facing the road ~= 1.0; ~0.58 ≈ a visible 25–30° head turn.
+  # Natural small movements stay above ~0.7 and never trigger.
+  look_away_straightness: 0.58
   # Sound the alarm for FACE_NOT_VISIBLE and PROLONGED_YAWN.
   # (LOW_LIGHT / BRIGHT_LIGHT / OUT_OF_FOCUS / LOOKING_AWAY are always
   # visual + log + status only.)
@@ -98,6 +104,41 @@ cnn:
   # Class ordering from the original notebook.
   # Indices: 0=yawn, 1=no_yawn, 2=Closed, 3=Open
   class_names: ["yawn", "no_yawn", "Closed", "Open"]
+
+# Unified audio pipeline — ONE block for ALL alerts.
+# Priority: drowsy (100) > look_away (60) > yawn (40) > low_light (20).
+# Higher priority pre-empts a lower one; a lower one never blocks a
+# higher one.  Each alert has an INACTIVE→PENDING→ACTIVE state machine
+# (beep on ACTIVE entry, repeat every repeat_seconds while ACTIVE).
+audio:
+  enabled: true
+  # DEBUG: one line per transition (type, state, value, threshold, t).
+  # Off by default.
+  debug: false
+  drowsy:                 # eyes closed / PERCLOS / yawn-rate / critical attention
+    priority: 100
+    repeat_seconds: 4.0   # matches the legacy alarm cooldown cadence
+    min_seconds: 0.0      # tracker already gates in time (closed_frame_threshold)
+    volume: 1.0
+    frequency_hz: 880.0   # used only if data/alarm.mp3 is missing
+  look_away:              # head turned away from the road
+    priority: 60
+    repeat_seconds: 2.0
+    min_seconds: 0.0      # tracker gates via distraction.look_away_seconds
+    volume: 0.8
+    frequency_hz: 660.0
+  yawn:                   # beep on yawn CONFIRMED (rising edge), ~0.5 s
+    priority: 40
+    repeat_seconds: 2.0
+    min_seconds: 0.0      # confirm timing via mouth.yawn_confirm_seconds
+    volume: 0.7
+    frequency_hz: 520.0
+  low_light:              # soft beep while frame is too dark
+    priority: 20
+    repeat_seconds: 4.0   # every 3–5 s, not continuously
+    min_seconds: 0.0      # enter < lighting.min_brightness / exit > recover_brightness
+    volume: 0.35          # noticeably softer than the other alerts
+    frequency_hz: 330.0
 
 server:
   enabled: true

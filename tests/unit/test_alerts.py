@@ -97,7 +97,7 @@ def test_face_missing_disabled_does_not_fire():
 # ---------------------------------------------------------------------------
 def test_looking_away_fires_after_consecutive_frames_and_clears():
     cfg = Config(distraction=DistractionConfig(
-        look_away_straightness=0.5, look_away_frames=3))
+        look_away_straightness=0.5, look_away_seconds=0.15))
     tr = DrowsinessTracker(cfg)
     tr.update(_det(t=0.0, straightness=0.2))
     tr.update(_det(t=0.1, straightness=0.2))

@@ -106,6 +106,12 @@ Every tunable parameter lives in [`config.yaml`](./config.yaml):
 | `distraction` | `look_away_straightness` | 0.55 | Head-yaw straightness below → looking away |
 | `distraction` | `look_away_frames`     | 10      | Frames before LOOKING_AWAY fires          |
 | `distraction` | `alarm_with_sound`     | `true`  | Sound alarm for critical alerts           |
+| `audio`     | `enabled`               | `true`  | Master switch for ALL alert audio          |
+| `audio`     | `debug`                 | `false` | One log line per alert transition          |
+| `audio`     | per-type blocks         | —       | `priority`, `repeat_seconds`, `min_seconds`, `volume`, `frequency_hz` |
+| `mouth`     | `yawn_confirm_seconds`  | `0.45`  | MAR must stay high this long → yawn confirmed (time-based, FPS-independent) |
+| `lighting`  | `recover_brightness`    | `65.0`  | LOW_LIGHT clears only above this (hysteresis) |
+| `distraction` | `look_away_seconds`   | `1.0`   | Sustained head-turn before LOOKING_AWAY fires |
 | `video`    | `target_fps`              | 15      | Loop pacing (15 FPS on i5-8265U)         |
 | `alarm`    | `cooldown_seconds`        | 4.0     | Cooldown between alarm triggers           |
 | `cnn`      | `model_path`              | `drowiness_new7.h5` | Legacy Keras verifier (optional) |
@@ -167,9 +173,16 @@ Detection details:
 * **Edge-triggered logging**: each alert logs once when it appears
   (`ALERT [CODE]: ...`) and once when it clears (`Alert cleared: ...`),
   never per-frame spam.
-* `FACE_NOT_VISIBLE` and `PROLONGED_YAWN` also sound the alarm when
-  `distraction.alarm_with_sound` is `true`; the rest are visual + log +
-  status only.
+* `FACE_NOT_VISIBLE` and `PROLONGED_YAWN` ride the `drowsy` audio bucket
+  when `distraction.alarm_with_sound` is `true`; the rest are visual + log
+  + status only.
+* All sound routes through one non-blocking **AudioManager**
+  (`drowsiness/alarms/audio_manager.py`): priority
+  `drowsy > look_away > yawn > low_light`, per-type `repeat_seconds` /
+  `volume` / `frequency_hz`, INACTIVE → PENDING → ACTIVE state machine,
+  higher priority pre-empts lower, a lower alert never blocks a higher
+  one, and audio failures never affect detection. Beeps are enqueued and
+  played by a dedicated daemon worker — the video loop never waits.
 * Drowsiness semantics are unchanged: `any_alarm` still means
   eye/yawn-rate/PERCLOS only; `any_alert` covers the new codes;
   `any_issue` = either.
@@ -183,7 +196,7 @@ The test suite covers **unit**, **end-to-end (E2E)**, and **system
 code on real face imagery or real geometric inputs.
 
 ```bash
-# Run everything (75 tests, ~20 s)
+# Run everything (95 tests, ~25 s)
 python -m pytest tests/ -v
 
 # Or just one layer
@@ -279,7 +292,8 @@ Driver_Drowsiness_Detection/
 │   │   └── source.py           # VideoSource wrapper
 │   ├── alarms/
 │   │   ├── base.py             # Alarm interface
-│   │   └── sound_alarm.py     # pygame-based sound alarm
+│   │   ├── audio_manager.py    # Unified non-blocking audio for ALL alerts
+│   │   └── sound_alarm.py     # Legacy alarm (kept for compatibility/tests)
 │   ├── state.py                # DrowsinessTracker state machine
 │   └── app.py                  # DrowsinessMonitor orchestrator + CLI
 ├── server.py                   # Flask status & control server

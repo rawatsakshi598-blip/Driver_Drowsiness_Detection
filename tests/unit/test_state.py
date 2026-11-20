@@ -103,7 +103,7 @@ def test_perclos_window_expires_old_entries():
 # ---------------------------------------------------------------------------
 def test_yawn_count_increments_on_rising_edge():
     """A yawn counts as ONE event, not N frames."""
-    cfg = Config(mouth=MouthConfig(yawn_frame_threshold=3,
+    cfg = Config(mouth=MouthConfig(yawn_confirm_seconds=0.2,
                                     yawn_rate_per_minute=999,
                                     yawn_window_seconds=60.0))
     tr = DrowsinessTracker(cfg)
@@ -117,7 +117,7 @@ def test_yawn_count_increments_on_rising_edge():
 
 def test_multiple_yawns_are_counted_separately():
     """Two distinct yawn events → count = 2."""
-    cfg = Config(mouth=MouthConfig(yawn_frame_threshold=2,
+    cfg = Config(mouth=MouthConfig(yawn_confirm_seconds=0.1,
                                     yawn_rate_per_minute=999,
                                     yawn_window_seconds=60.0))
     tr = DrowsinessTracker(cfg)
@@ -135,20 +135,20 @@ def test_multiple_yawns_are_counted_separately():
 
 def test_yawn_below_threshold_does_not_count():
     """Brief mouth openings (< yawn_frame_threshold frames) don't count."""
-    cfg = Config(mouth=MouthConfig(yawn_frame_threshold=10,
+    cfg = Config(mouth=MouthConfig(yawn_confirm_seconds=0.6,
                                     yawn_rate_per_minute=999,
                                     yawn_window_seconds=60.0))
     tr = DrowsinessTracker(cfg)
     t0 = time.time()
-    for i in range(5):  # 5 < 10 threshold
-        tr.update(_det(t=t0 + i, yawning=True, mar=0.7, idx=i))
-    tr.update(_det(t=t0 + 5, yawning=False, mar=0.1, idx=5))
+    for i in range(5):  # 0.4 s total < 0.6 s confirm window
+        tr.update(_det(t=t0 + i * 0.1, yawning=True, mar=0.7, idx=i))
+    tr.update(_det(t=t0 + 0.5, yawning=False, mar=0.1, idx=5))
     assert tr.state.yawn_count_window == 0
 
 
 def test_yawn_rate_triggers_alarm():
     """3 yawns in a 60 s window → yawn_rate_per_min = 3 → alarm fires."""
-    cfg = Config(mouth=MouthConfig(yawn_frame_threshold=2,
+    cfg = Config(mouth=MouthConfig(yawn_confirm_seconds=0.1,
                                     yawn_rate_per_minute=3,
                                     yawn_window_seconds=60.0))
     tr = DrowsinessTracker(cfg)
