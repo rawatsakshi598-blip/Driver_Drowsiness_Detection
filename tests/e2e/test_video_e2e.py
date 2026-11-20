@@ -42,12 +42,16 @@ def _run_pipeline(video_path: Path, *, override_cfg=None):
     src.open()
     try:
         idx = 0
+        source_fps = src.fps() or cfg.video.target_fps
         while True:
             frame = src.read()
             if frame is None:
                 break
             d = det.detect(frame.image)
             d.frame_index = idx
+            # Use CONTENT time for files — wall-clock at fast playback
+            # breaks time-based thresholds (yawn confirm, look-away...).
+            d.timestamp = idx / float(source_fps)
             idx += 1
             tr.update(d)
     finally:

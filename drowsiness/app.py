@@ -109,6 +109,13 @@ class DrowsinessMonitor:
                 # Pace to target FPS — drop the frame if we are behind.
                 detection = self._detector.detect(frame.image)
                 detection.frame_index = next_frame_idx
+                # FILE sources: use CONTENT time (seconds into the video),
+                # not wall-clock time.  Wall-clock timestamps make
+                # time-based thresholds (yawn confirm, look-away, no-face)
+                # speed-dependent on fast file playback.
+                source_time = self._source_frame_seconds(frame)
+                if source_time is not None:
+                    detection.timestamp = source_time
                 next_frame_idx += 1
 
                 # Optionally run the CNN verifier every Nth frame.
@@ -211,6 +218,19 @@ class DrowsinessMonitor:
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+    def _source_frame_seconds(self, frame) -> Optional[float]:
+        """Content timestamp (seconds) for FILE/RTSP sources, else None.
+
+        Live cameras keep wall-clock timestamps.  Files/streams report a
+        nominal FPS we can use to get deterministic content time.
+        """
+        if isinstance(self._cfg.video.source, int):
+            return None  # live webcam — wall clock is the right clock
+        fps = self._source.fps()
+        if not fps or fps <= 0:
+            fps = float(self._cfg.video.target_fps)
+        return frame.frame_index / float(fps)
+
     def _update_audio(self, state, now: float) -> None:
         """Route this frame's alert conditions into the shared AudioManager.
 
